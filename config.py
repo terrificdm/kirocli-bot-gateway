@@ -218,6 +218,10 @@ class Config:
     discord: DiscordConfig = field(default_factory=DiscordConfig)
     kiro: KiroConfig = field(default_factory=KiroConfig)
     log_level: str = "INFO"
+    debounce_discord: float = 1.5   # seconds, debounce window for Discord
+    debounce_feishu: float = 1.0    # seconds, debounce window for Feishu
+    debounce_default: float = 1.5   # seconds, fallback for other platforms
+    pending_cap: int = 20           # max pending messages per chat
 
     def get_workspace_mode(self, platform: str) -> str:
         """Get workspace_mode for a platform (platform-specific or global default)."""
@@ -388,4 +392,8 @@ def load_config() -> Config:
         discord=discord,
         kiro=kiro,
         log_level=os.getenv("LOG_LEVEL", "INFO"),
+        debounce_discord=float(os.getenv("DEBOUNCE_DISCORD", "1.5")),
+        debounce_feishu=float(os.getenv("DEBOUNCE_FEISHU", "1.0")),
+        debounce_default=float(os.getenv("DEBOUNCE_DEFAULT", "1.5")),
+        pending_cap=int(os.getenv("PENDING_CAP", "20")),
     )

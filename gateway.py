@@ -94,9 +94,16 @@ class Gateway:
         self._processing: dict[str, bool] = {}
         self._processing_lock = threading.Lock()
         
-        # Message queue: "platform:chat_id" -> list of (text, images)
-        self._message_queue: dict[str, list] = {}
-        self._queue_lock = threading.Lock()
+        # Pending messages for debounce + collect: key -> [(text, images)]
+        self._pending_messages: dict[str, list[tuple[str, list | None]]] = {}
+        self._pending_lock = threading.Lock()
+        self._debounce_timers: dict[str, threading.Timer] = {}
+        self._DEBOUNCE_BY_PLATFORM = {
+            "discord": config.debounce_discord,
+            "feishu": config.debounce_feishu,
+        }
+        self._DEBOUNCE_DEFAULT = config.debounce_default
+        self._PENDING_CAP = config.pending_cap
         
         # Pending permission requests: "platform:chat_id" -> (event, result_holder)
         self._pending_permissions: dict[str, tuple[threading.Event, list]] = {}
@@ -130,6 +137,11 @@ class Gateway:
         def shutdown(sig, frame):
             log.info("[Gateway] Shutting down...")
             self._idle_checker_stop.set()
+            # Cancel all debounce timers
+            with self._pending_lock:
+                for timer in self._debounce_timers.values():
+                    timer.cancel()
+                self._debounce_timers.clear()
             self._stop_all_acp()
             for adapter in self._adapters:
                 adapter.stop()
@@ -400,12 +412,31 @@ class Gateway:
             self._handle_command(platform, chat_id, key, text)
             return
 
-        # Process message in thread
-        threading.Thread(
-            target=self._process_message,
-            args=(platform, chat_id, key, text, images),
-            daemon=True,
-        ).start()
+        # Store in pending buffer for debounce + collect
+        with self._pending_lock:
+            if key not in self._pending_messages:
+                self._pending_messages[key] = []
+            pending = self._pending_messages[key]
+            if len(pending) >= self._PENDING_CAP:
+                self._send_text_nowait(platform, chat_id,
+                                       f"⚠️ Too many pending messages (max {self._PENDING_CAP})")
+                return
+            pending.append((text, images))
+
+        with self._processing_lock:
+            is_busy = self._processing.get(key, False)
+
+        if is_busy:
+            # Currently processing — send typing indicator, loop will drain pending
+            adapter = self._adapter_map.get(platform)
+            if adapter:
+                adapter.send_typing(chat_id)
+        else:
+            # Idle — send immediate typing feedback, then start/reset debounce
+            adapter = self._adapter_map.get(platform)
+            if adapter:
+                adapter.send_typing(chat_id)
+            self._reset_debounce(platform, chat_id, key)
 
     def _handle_cancel(self, platform: str, chat_id: str, key: str):
         """Handle cancel command.
@@ -413,27 +444,29 @@ class Gateway:
         Uses _send_text_nowait to avoid deadlocking Discord's event loop
         (this is called synchronously from the adapter's message handler).
         """
-        queue_cleared = 0
-        with self._queue_lock:
-            if key in self._message_queue:
-                queue_cleared = len(self._message_queue[key])
-                del self._message_queue[key]
+        # Cancel debounce timer and clear pending messages
+        pending_cleared = 0
+        with self._pending_lock:
+            timer = self._debounce_timers.pop(key, None)
+            if timer:
+                timer.cancel()
+            pending_cleared = len(self._pending_messages.pop(key, []))
         
         with self._contexts_lock:
             ctx = self._contexts.get(key)
             session_id = ctx.session_id if ctx else None
 
         if not session_id:
-            if queue_cleared:
-                self._send_text_nowait(platform, chat_id, f"🗑️ Cleared {queue_cleared} queued message(s)")
+            if pending_cleared:
+                self._send_text_nowait(platform, chat_id, f"🗑️ Cleared {pending_cleared} queued message(s)")
             else:
                 self._send_text_nowait(platform, chat_id, "❌ No active session")
             return
 
         acp = self._get_acp(platform)
         if not acp:
-            if queue_cleared:
-                self._send_text_nowait(platform, chat_id, f"🗑️ Cleared {queue_cleared} queued message(s)")
+            if pending_cleared:
+                self._send_text_nowait(platform, chat_id, f"🗑️ Cleared {pending_cleared} queued message(s)")
             else:
                 self._send_text_nowait(platform, chat_id, "❌ Kiro is not running")
             return
@@ -441,8 +474,8 @@ class Gateway:
         try:
             acp.session_cancel(session_id)
             msg = "⏹️ Cancel request sent"
-            if queue_cleared:
-                msg += f"\n🗑️ Cleared {queue_cleared} queued message(s)"
+            if pending_cleared:
+                msg += f"\n🗑️ Cleared {pending_cleared} queued message(s)"
             self._send_text_nowait(platform, chat_id, msg)
         except Exception as e:
             log.error("[Gateway] [%s] Cancel failed: %s", key, e)
@@ -638,42 +671,89 @@ class Gateway:
             except Exception as e:
                 return f"❌ Switch failed: {e}"
 
-    def _process_message(self, platform: str, chat_id: str, key: str, text: str, images: list[tuple[str, str]] | None = None):
-        """Process a message, queuing if busy."""
+    def _reset_debounce(self, platform: str, chat_id: str, key: str):
+        """Start or reset the debounce timer for a chat.
+        
+        Cancels any existing timer and starts a new one. When the timer fires,
+        all pending messages are merged and processed as a single turn.
+        """
+        with self._pending_lock:
+            old_timer = self._debounce_timers.get(key)
+            if old_timer:
+                old_timer.cancel()
+            debounce_sec = self._DEBOUNCE_BY_PLATFORM.get(platform, self._DEBOUNCE_DEFAULT)
+            timer = threading.Timer(
+                debounce_sec,
+                self._debounce_fire,
+                args=(platform, chat_id, key),
+            )
+            timer.daemon = True
+            self._debounce_timers[key] = timer
+            timer.start()
+
+    def _debounce_fire(self, platform: str, chat_id: str, key: str):
+        """Called when debounce timer expires. Starts processing in a new thread."""
+        with self._pending_lock:
+            self._debounce_timers.pop(key, None)
+        threading.Thread(
+            target=self._process_message,
+            args=(platform, chat_id, key),
+            daemon=True,
+        ).start()
+
+    @staticmethod
+    def _merge_messages(messages: list[tuple[str, list | None]]) -> tuple[str, list | None]:
+        """Merge multiple pending messages into a single prompt.
+        
+        Single message is returned as-is. Multiple messages have their text
+        joined with newlines and images concatenated.
+        """
+        if len(messages) == 1:
+            return messages[0]
+
+        texts = [text for text, _ in messages if text]
+        all_images: list = []
+        for _, images in messages:
+            if images:
+                all_images.extend(images)
+
+        merged_text = "\n".join(texts)
+        return merged_text, all_images or None
+
+    def _process_message(self, platform: str, chat_id: str, key: str):
+        """Process pending messages with collect semantics."""
         with self._processing_lock:
             if self._processing.get(key):
-                with self._queue_lock:
-                    if key not in self._message_queue:
-                        self._message_queue[key] = []
-                    queue = self._message_queue[key]
-                    if len(queue) < 5:
-                        queue.append((text, images))
-                        self._send_text(platform, chat_id, f"📥 Queued #{len(queue)}\n💡 Send 'cancel' to clear")
-                        log.info("[Gateway] [%s] Message queued, size: %d", key, len(queue))
-                    else:
-                        self._send_text(platform, chat_id, "⚠️ Queue full (max 5)")
-                return
+                return  # Another thread is already processing; it will drain pending
             self._processing[key] = True
 
         try:
-            self._process_message_loop(platform, chat_id, key, text, images)
+            self._process_message_loop(platform, chat_id, key)
         finally:
             with self._processing_lock:
                 self._processing[key] = False
+            # Race condition fix: if new messages arrived while we were finishing,
+            # kick off another debounce so they don't get stuck in pending.
+            with self._pending_lock:
+                if self._pending_messages.get(key):
+                    self._reset_debounce(platform, chat_id, key)
 
-    def _process_message_loop(self, platform: str, chat_id: str, key: str, text: str, images: list[tuple[str, str]] | None = None):
-        """Process current and queued messages."""
+    def _process_message_loop(self, platform: str, chat_id: str, key: str):
+        """Drain and process pending messages in a loop.
+        
+        Each iteration merges all currently pending messages into one prompt.
+        After processing, checks for new messages that arrived during the run.
+        """
         while True:
+            with self._pending_lock:
+                messages = self._pending_messages.pop(key, [])
+            if not messages:
+                break
+
+            text, images = self._merge_messages(messages)
+            if len(messages) > 1:
+                log.info("[Gateway] [%s] Merged %d messages into one prompt", key, len(messages))
             self._process_single_message(platform, chat_id, key, text, images)
-            
-            with self._queue_lock:
-                queue = self._message_queue.get(key, [])
-                if not queue:
-                    if key in self._message_queue:
-                        del self._message_queue[key]
-                    break
-                text, images = queue.pop(0)
-                log.info("[Gateway] [%s] Processing queued, remaining: %d", key, len(queue))
 
     def _process_single_message(self, platform: str, chat_id: str, key: str, text: str, images: list[tuple[str, str]] | None = None):
         """Process a single message."""
