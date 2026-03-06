@@ -59,6 +59,7 @@ class ChatContext:
     chat_id: str
     platform: str
     session_id: str | None = None
+    mode_id: str = ""  # Remember agent selection across session_load
 
 
 class Gateway:
@@ -191,7 +192,10 @@ class Gateway:
             cwd = self._config.get_kiro_cwd(platform)
             acp.start(cwd=cwd)
             # Use default argument to capture platform value (avoid closure issue)
-            acp.on_permission_request(lambda req, p=platform: self._handle_permission(req, p))
+            if not self._config.kiro.auto_approve:
+                acp.on_permission_request(lambda req, p=platform: self._handle_permission(req, p))
+            else:
+                log.info("[Gateway] [%s] Auto-approve enabled, skipping permission handler", platform)
             
             self._acp_clients[platform] = acp
             self._last_activity[platform] = time.time()
@@ -606,6 +610,13 @@ class Gateway:
             
             try:
                 acp.session_set_mode(session_id, args)
+                # Save mode selection for restoration after session_load
+                key = self._session_to_key.get(session_id)
+                if key:
+                    with self._contexts_lock:
+                        ctx = self._contexts.get(key)
+                        if ctx:
+                            ctx.mode_id = args
                 return f"✅ Switched to agent: **{args}**"
             except Exception as e:
                 return f"❌ Switch failed: {e}"
@@ -884,6 +895,12 @@ class Gateway:
             if ctx and ctx.session_id:
                 try:
                     acp.session_load(ctx.session_id, work_dir)
+                    # Restore agent selection (session_load resets mode to default)
+                    if ctx.mode_id:
+                        try:
+                            acp.session_set_mode(ctx.session_id, ctx.mode_id)
+                        except Exception as e:
+                            log.warning("[Gateway] [%s] Failed to restore mode '%s': %s", key, ctx.mode_id, e)
                     log.info("[Gateway] [%s] Loaded session", key)
                     return ctx.session_id
                 except Exception as e:

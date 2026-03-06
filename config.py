@@ -209,6 +209,7 @@ class KiroConfig:
     default_cwd: str = ""  # Default working directory if platform doesn't specify
     idle_timeout: int = 300  # seconds
     workspace_mode: str = "per_chat"  # Global default: "fixed" or "per_chat"
+    auto_approve: bool = False  # Auto-approve all permission requests from Kiro
 
 
 @dataclass
@@ -385,6 +386,7 @@ def load_config() -> Config:
         default_cwd=os.getenv("KIRO_CWD", os.getcwd()),
         idle_timeout=int(os.getenv("KIRO_IDLE_TIMEOUT", "300")),
         workspace_mode=_parse_workspace_mode(os.getenv("KIRO_WORKSPACE_MODE"), "per_chat"),
+        auto_approve=os.getenv("KIRO_AUTO_APPROVE", "false").lower() in ("true", "1", "yes"),
     )
 
     return Config(
