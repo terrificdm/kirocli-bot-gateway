@@ -774,7 +774,7 @@ class Gateway:
         # Streaming state
         _stream_lock = threading.Lock()
         _last_stream_update = [0.0]
-        _STREAM_INTERVAL = 1.5  # seconds between card updates (Feishu rate limit safe)
+        _STREAM_INTERVAL = 1.0  # seconds between card updates (Feishu rate limit safe)
         
         def _on_stream(chunk: str, accumulated: str):
             """Called from ACP read thread on each text chunk."""
