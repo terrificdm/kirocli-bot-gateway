@@ -905,18 +905,12 @@ class Gateway:
         with self._contexts_lock:
             ctx = self._contexts.get(key)
             if ctx and ctx.session_id:
-                try:
-                    acp.session_load(ctx.session_id, work_dir)
-                    # Restore agent selection (session_load resets mode to default)
-                    if ctx.mode_id:
-                        try:
-                            acp.session_set_mode(ctx.session_id, ctx.mode_id)
-                        except Exception as e:
-                            log.warning("[Gateway] [%s] Failed to restore mode '%s': %s", key, ctx.mode_id, e)
-                    log.info("[Gateway] [%s] Loaded session", key)
-                    return ctx.session_id
-                except Exception as e:
-                    log.warning("[Gateway] [%s] Failed to load session: %s", key, e)
+                # Session already in memory — just reuse it, no need to load.
+                # session/load is only needed after kiro-cli restart to restore
+                # from disk, but _start_acp clears _contexts on restart so we
+                # never reach here with a stale session_id.
+                log.info("[Gateway] [%s] Reusing session %s", key, ctx.session_id)
+                return ctx.session_id
 
         session_id, modes = acp.session_new(work_dir)
         log.info("[Gateway] [%s] Created session %s (cwd: %s)", key, session_id, work_dir)
