@@ -5,8 +5,10 @@ Each platform gets its own Kiro CLI instance for fault isolation.
 workspace_mode only affects session working directories, not Kiro CLI instances.
 """
 
+import base64
 import logging
 import os
+import shutil
 import signal
 import sys
 import threading
@@ -224,13 +226,15 @@ class Gateway:
             log.info("[Gateway] [%s] Stopping kiro-cli...", platform)
             acp.stop()
             
-            # Clear sessions for this platform
+            # Clear sessions and clean up images for this platform
             with self._contexts_lock:
                 keys_to_remove = [k for k in self._contexts if k.startswith(f"{platform}:")]
                 for k in keys_to_remove:
                     ctx = self._contexts.pop(k, None)
-                    if ctx and ctx.session_id:
-                        self._session_to_key.pop(ctx.session_id, None)
+                    if ctx:
+                        if ctx.session_id:
+                            self._session_to_key.pop(ctx.session_id, None)
+                        self._cleanup_images(platform, ctx.chat_id)
             
             log.info("[Gateway] [%s] kiro-cli stopped", platform)
 
@@ -738,6 +742,42 @@ class Gateway:
         merged_text = "\n".join(texts)
         return merged_text, all_images or None
 
+    def _save_images(self, work_dir: str, images: list[tuple[str, str]]) -> list[str]:
+        """Save base64 images to workspace and return absolute file paths."""
+        images_dir = os.path.join(work_dir, "images")
+        os.makedirs(images_dir, exist_ok=True)
+
+        saved = []
+        ts = int(time.time() * 1000)
+        ext_map = {
+            "image/jpeg": "jpg", "image/png": "png",
+            "image/gif": "gif", "image/webp": "webp",
+        }
+
+        for i, (b64_data, mime_type) in enumerate(images):
+            ext = ext_map.get(mime_type, "jpg")
+            filename = f"{ts}_{i}.{ext}"
+            filepath = os.path.join(images_dir, filename)
+
+            with open(filepath, "wb") as f:
+                f.write(base64.b64decode(b64_data))
+
+            saved.append(filepath)
+            log.info("[Gateway] Saved image: %s (%d bytes)", filepath, os.path.getsize(filepath))
+
+        return saved
+
+    def _cleanup_images(self, platform: str, chat_id: str):
+        """Remove saved images for a chat session."""
+        work_dir = self._config.get_session_cwd(platform, chat_id)
+        images_dir = os.path.join(work_dir, "images")
+        if os.path.isdir(images_dir):
+            try:
+                shutil.rmtree(images_dir)
+                log.info("[Gateway] Cleaned up images: %s", images_dir)
+            except OSError as e:
+                log.warning("[Gateway] Failed to clean images %s: %s", images_dir, e)
+
     def _process_message(self, platform: str, chat_id: str, key: str):
         """Process pending messages with collect semantics."""
         with self._processing_lock:
@@ -831,6 +871,14 @@ class Gateway:
 
             session_id = self._get_or_create_session(platform, chat_id, key, acp)
             self._session_to_key[session_id] = key
+
+            # Save images to workspace so kiro can re-read them later via Read tool
+            if images:
+                work_dir = self._config.get_session_cwd(platform, chat_id)
+                saved_paths = self._save_images(work_dir, images)
+                if saved_paths:
+                    path_note = ", ".join(saved_paths)
+                    text = (text or "") + f"\n\n[Image saved: {path_note}]"
 
             # Send to Kiro (with streaming for card-based platforms)
             stream_cb = _on_stream if card_handle else None

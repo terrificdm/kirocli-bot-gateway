@@ -46,6 +46,7 @@ Multi-platform bot gateway for Kiro CLI via ACP protocol.
 - **🔐 交互式权限审批**：敏感操作需用户确认（y/n/t）
 - **⚡ 按需启动**：仅在收到消息时启动 Kiro CLI
 - **⏱️ 空闲自动关闭**：可配置的空闲超时
+- **🖼️ 图片支持**：发送图片进行视觉分析（JPEG、PNG、GIF、WebP），自动检测真实格式
 - **🛑 取消操作**：发送 "cancel" 中断当前操作
 - **🔧 MCP 和 Skills 支持**：全局或项目级配置
 
@@ -320,6 +321,14 @@ journalctl -u kiro-gateway -f
 > （如 `~/.local/bin`、nvm 的 `bin` 目录）。
 
 ## 使用方法
+
+### 图片支持
+
+发送图片让 Kiro 分析——截图、架构图、报错信息等。
+
+- **支持格式**：JPEG、PNG、GIF、WebP
+- **自动格式检测**：网关从图片数据自动检测真实格式，修正平台可能误报的 MIME 类型
+- **图片持久化**：图片保存到工作空间，Kiro 在后续对话轮次中可以重新读取
 
 ### 触发方式
 

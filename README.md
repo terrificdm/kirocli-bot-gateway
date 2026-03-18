@@ -48,6 +48,7 @@ Multi-platform bot gateway for Kiro CLI via ACP protocol.
 - **🔐 Interactive Permission Approval**: User approves sensitive operations (y/n/t)
 - **⚡ On-Demand Startup**: Kiro CLI starts only when needed
 - **⏱️ Auto Idle Shutdown**: Configurable idle timeout per platform
+- **🖼️ Image Support**: Send images for visual analysis (JPEG, PNG, GIF, WebP) with auto MIME detection
 - **🛑 Cancel Operation**: Send "cancel" to interrupt
 - **🔧 MCP & Skills Support**: Global or project-level configuration
 
@@ -322,6 +323,14 @@ journalctl -u kiro-gateway -f
 > are installed (e.g. `~/.local/bin`, nvm's `bin` directory).
 
 ## Usage
+
+### Image Support
+
+Send images alongside text for Kiro to analyze — screenshots, diagrams, error messages, etc.
+
+- **Supported formats**: JPEG, PNG, GIF, WebP
+- **Auto MIME detection**: The gateway detects the actual image format from file data, correcting any misreported MIME types from platforms
+- **Image persistence**: Images are saved to workspace so Kiro can re-read them in subsequent turns
 
 ### Chat Commands
 

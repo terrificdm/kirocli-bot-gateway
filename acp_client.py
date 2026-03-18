@@ -267,6 +267,23 @@ class ACPClient:
         """Get available commands for a session (from _kiro.dev/commands/available notification)."""
         return self._session_commands.get(session_id, [])
 
+    @staticmethod
+    def _detect_image_mime(b64_data: str) -> str | None:
+        """Detect real image MIME type from base64 magic bytes.
+
+        Platforms (e.g. Discord) sometimes report wrong content-type.
+        Kiro supports: JPEG, PNG, GIF, WebP.
+        """
+        if b64_data.startswith("iVBORw"):       # PNG  \x89PNG
+            return "image/png"
+        elif b64_data.startswith("/9j/"):        # JPEG \xFF\xD8\xFF
+            return "image/jpeg"
+        elif b64_data.startswith("R0lGOD"):      # GIF  GIF8
+            return "image/gif"
+        elif b64_data.startswith("UklGR"):       # WebP RIFF...WEBP
+            return "image/webp"
+        return None
+
     def session_prompt(self, session_id: str, text: str, images: list[tuple[str, str]] | None = None, timeout: float = 300, on_stream: Callable[[str, str], None] | None = None) -> PromptResult:
         """Send a prompt and collect the full response (blocking).
         
@@ -297,6 +314,11 @@ class ACPClient:
             # ACP spec: {"type": "image", "data": "<base64>", "mimeType": "image/jpeg"}
             if images:
                 for b64_data, mime_type in images:
+                    # Detect real MIME from magic bytes — platforms may report wrong type
+                    detected = self._detect_image_mime(b64_data)
+                    if detected and detected != mime_type:
+                        log.info("[ACP] MIME corrected: %s -> %s", mime_type, detected)
+                        mime_type = detected
                     prompt_content.append({
                         "type": "image",
                         "data": b64_data,
