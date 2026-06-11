@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/terrificdm-kirocli-bot-gateway-badge.png)](https://mseep.ai/app/terrificdm-kirocli-bot-gateway)
+
 # KiroCLI Bot Gateway
 
 [中文文档](README.zh-CN.md)
